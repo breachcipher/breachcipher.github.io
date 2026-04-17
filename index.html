@@ -38,22 +38,19 @@
 
   <style>
   :root { 
-  --cyber-blue: #00d4ff; 
-  --deep-blue: #005b96;
+  --cyber-blue: #67e8f9;     /* Cyan yang lebih soft (bukan #00d4ff) */
+  --accent-color: #67e8f9;   /* Ganti semua accent pakai ini */
+  --deep-blue: #0f172a;
   }
   
   [data-theme="dark"] {
   --bg-body: #0a0a0a;
-  --menu-bg: #080a08;
-  --menu-text: #e0e0e0;
-  --menu-border: #333333;
-  --item-hover: #1a1a1a;
-  --navbar-bg: #080a08;
-  --navbar-border: #333;
-  --navbar-text: #ffffff;
-  --card-bg: rgba(22, 22, 22, 0.8);
-  --accent-color: var(--cyber-blue);
-  --course-title: var(--cyber-blue);
+  --menu-bg: #080808;
+  --menu-text: #e6e6e6;      /* Soft white */
+  --text-primary: #e6e6e6;
+  --text-secondary: #a3a3a3;
+  --accent-color: #67e8f9;
+  --course-title: #67e8f9;
   }
   
   [data-theme="light"] {
@@ -70,6 +67,10 @@
   --course-title: #005b96;
   }
   
+.accent-text, .profile-name, .section-title {
+  text-shadow: 0 0 8px rgba(103, 232, 249, 0.5);   /* glow ringan */
+}
+    
   /* KHUSUS DARK MODE: Warna Teks Menjadi Cyber Accent */
   [data-theme="dark"] .main-navbar a {
   color: var(--accent-color) !important;
