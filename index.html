@@ -164,38 +164,85 @@
   
   .hero-section {
   position: relative;
-    overflow: hidden;
+  overflow: hidden;
   height: 380px !important;
-  display: flex; align-items: center; justify-content: center;
+  display: flex; 
+  align-items: center; 
+  justify-content: center;
   background-image: url('assets/img/wallpaper.png') !important; 
-  background-size: cover; background-position: center !important;
-  z-index: 2; cursor: pointer;
-  }
+  background-size: cover; 
+  background-position: center !important;
+  z-index: 2; 
+  cursor: pointer;
+}
 
-    .hero-section::after {
-    content: "";
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 5px; /* Ketebalan garis */
-    background: rgba(0, 212, 255, 0.8);
-    box-shadow: 0 0 20px #00d4ff, 0 0 40px #00d4ff;
-    z-index: 10;
-    animation: scanning 3s linear infinite;
-    opacity: 0.7;
-    }
-  
-  /* Efek Layar Monitor (Garis-garis halus) */
-.hero-section::before {
-    content: "";
-    position: absolute;
-    top: 0; left: 0; width: 100%; height: 100%;
-    background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.1) 50%),
-                linear-gradient(90deg, rgba(255, 0, 0, 0.03), rgba(0, 255, 0, 0.01), rgba(0, 0, 255, 0.03));
-    background-size: 100% 4px, 4px 100%;
-    z-index: 5;
-    pointer-events: none;
+/* Efek garis scanning BERGERAK */
+.hero-section.scan-active::after {
+  content: '';
+  position: absolute;
+  top: -10%;
+  left: 0;
+  width: 100%;
+  height: 5px;
+  background: linear-gradient(90deg, 
+    transparent, 
+    rgba(0, 212, 255, 0.9), 
+    #00d4ff,
+    rgba(0, 212, 255, 0.9), 
+    transparent
+  );
+  filter: blur(2px);
+  z-index: 15;
+  pointer-events: none;
+  animation: scanMove 1.2s ease-out forwards;
+  box-shadow: 0 0 20px #00d4ff;
+}
+
+/* Efek overlay transparan saat scanning */
+.hero-section.scan-active::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 212, 255, 0.08);
+  pointer-events: none;
+  z-index: 10;
+  animation: scanFade 1.2s ease-out forwards;
+}
+
+/* Animasi garis scanning dari atas ke bawah */
+@keyframes scanMove {
+  0% {
+    top: -10%;
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  50% {
+    top: 48%;
+    opacity: 1;
+    filter: blur(3px);
+    box-shadow: 0 0 30px #00d4ff;
+  }
+  90% {
+    opacity: 0.8;
+  }
+  100% {
+    top: 110%;
+    opacity: 0;
+    filter: blur(1px);
+  }
+}
+
+/* Animasi fade overlay */
+@keyframes scanFade {
+  0% { opacity: 0; }
+  20% { opacity: 1; }
+  80% { opacity: 0.5; }
+  100% { opacity: 0; }
 }
   
   /* FIX NAVBAR POSITION */
@@ -1926,13 +1973,55 @@
   </script>
   <script>
   
-  function triggerJumbotronGlitch() {
+  // HAPUS atau KOMENTARI fungsi triggerJumbotronGlitch yang lama
+// function triggerJumbotronGlitch() { ... }
+
+// FUNGSI SCANNING BARU
+function triggerScanEffect() {
   const hero = document.querySelector('.hero-section');
-  hero.classList.add('hero-glitch');
+  
+  // Cegah jika sedang scanning
+  if (hero.classList.contains('scan-active')) return;
+  
+  // Aktifkan efek scanning
+  hero.classList.add('scan-active');
+  
+  // Matikan efek setelah animasi selesai
   setTimeout(() => {
-  hero.classList.remove('hero-glitch');
-  }, 400);
+    hero.classList.remove('scan-active');
+  }, 1200);
+}
+
+// Scanning muncul secara RANDOM (6-15 detik sekali)
+function startRandomScan() {
+  const minDelay = 6000;
+  const maxDelay = 15000;
+  
+  function scheduleScan() {
+    const delay = Math.random() * (maxDelay - minDelay) + minDelay;
+    setTimeout(() => {
+      triggerScanEffect();
+      scheduleScan();
+    }, delay);
   }
+  
+  scheduleScan();
+}
+
+// Mulai scanning random setelah halaman dimuat
+window.addEventListener('load', () => {
+  startRandomScan();
+  // Scanning pertama kali setelah 1.5 detik
+  setTimeout(() => {
+    triggerScanEffect();
+  }, 1500);
+});
+
+// Scanning saat jumbotron diklik
+document.querySelector('.hero-section')?.addEventListener('click', () => {
+  triggerScanEffect();
+});
+  
   
   setInterval(() => {
   const chance = Math.random();
