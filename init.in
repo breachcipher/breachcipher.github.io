@@ -67,8 +67,10 @@ find_boot_device() {
   while [ $count -lt $timeout ]; do
 
     # PRIORITAS 1: Loop device (Ventoy mount ISO ke /dev/loop*)
-    for loopdev in /dev/loop*; do
+    # Hanya probe loop yang BENAR-BENAR sedang dipakai (losetup -l)
+    for loopdev in $(losetup -l -n -O NAME 2>/dev/null); do
       [ -b "$loopdev" ] || continue
+      log_msg "Probing active loop $loopdev..."
       if mount -t auto -o ro "$loopdev" "$mnt_tmp" 2>/dev/null; then
         if [ -f "$mnt_tmp/boot/lfs.squashfs" ]; then
           device="$loopdev"
@@ -94,12 +96,24 @@ find_boot_device() {
     probe_dev() {
       local d="$1"
       [ -b "$d" ] || return 1
-      case "$d" in /dev/sr*|/dev/cdrom|/dev/dvd) return 1 ;; esac
-      local fs
+      # Skip optical, loop mentah, swap
+      case "$d" in
+        /dev/sr*|/dev/cdrom|/dev/dvd) return 1 ;;
+        /dev/loop*)                   return 1 ;;  # loop sudah ditangani prioritas 1
+      esac
+      local fs type
       fs=$(lsblk -nlo FSTYPE "$d" 2>/dev/null)
+      type=$(lsblk -nlo TYPE "$d" 2>/dev/null)
+      # Skip swap
       [ "$fs" = "swap" ] && return 1
-      # Skip disk tanpa fstype yang juga bukan partisi (disk mentah, coba tetap)
-      log_msg "Probing $d (fstype: ${fs:-raw})..."
+      # Skip disk mentah (type=disk) yang tidak punya fstype — kemungkinan besar MBR/GPT disk
+      # Kecuali jika tidak ada partisi sama sekali di dalamnya
+      if [ "$type" = "disk" ] && [ -z "$fs" ]; then
+        local has_part
+        has_part=$(lsblk -nlo NAME "$d" 2>/dev/null | grep -v "^$(basename $d)$" | wc -l)
+        [ "$has_part" -gt 0 ] && return 1  # ada partisi, skip disk — probe partisinya saja
+      fi
+      log_msg "Probing $d (type: ${type:-?}, fstype: ${fs:-raw})..."
       if mount -t auto -o ro "$d" "$mnt_tmp" 2>/dev/null; then
         if [ -f "$mnt_tmp/boot/lfs.squashfs" ]; then
           device="$d"
@@ -404,9 +418,9 @@ do_mount_root() {
     vboxvideo vmwgfx \
     drm drm_kms_helper \
     vfat fat nls_cp437 nls_iso8859_1 \
-    iso9660 udf \
+    iso9660 udf e1000 e1000e pcnet32 \
     squashfs overlay loop \
-    dm_mod e1000 e1000e pcnet32 \
+    dm_mod \
     cfg80211 mac80211 \
     iwlwifi rtlwifi rtl8xxxu ath9k \
     rtl8192ce 8188eu
