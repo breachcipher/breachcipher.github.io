@@ -88,7 +88,7 @@ find_boot_device() {
     done
 
     # CD/DVD optical
-    for dev in /dev/sr* /dev/cdrom /dev/dvd; do
+    for dev in /dev/sr* /dev/cdrom /dev/dvd /dev/sd*; do
       [ -b "$dev" ] || continue
       if mount -t iso9660 -o ro "$dev" "$mnt_tmp" 2>/dev/null; then
         if [ -f "$mnt_tmp/boot/lfs.squashfs" ]; then
@@ -123,7 +123,7 @@ ensure_users() {
     log_msg "Creating minimal /etc/passwd in overlay..."
     cat > /.root/etc/passwd << 'EOF'
 root:x:0:0:root:/root:/bin/bash
-leakos:x:1000:1000:Live User:/home/leakos:/bin/bash
+live:x:1000:1000:Live User:/home/live:/bin/bash
 nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin
 EOF
   fi
@@ -132,7 +132,7 @@ EOF
     log_msg "Creating minimal /etc/group in overlay..."
     cat > /.root/etc/group << 'EOF'
 root:x:0:
-leakos:x:1000:
+live:x:1000:
 nogroup:x:65534:
 EOF
   fi
@@ -141,7 +141,7 @@ EOF
     log_msg "Creating minimal /etc/shadow in overlay..."
     cat > /.root/etc/shadow << 'EOF'
 root:*:19490:0:99999:7:::
-leakos::19490:0:99999:7:::
+live:$6$hrIle5KuazOX40Ge$aXM7O70/9.fvyVFD2IszFjz85qJsU/YGP2aRSkzQPVKtsOB47uXaA80NKGhSn92ZJ3RDNvC3IRnaTN8IbdodG.:19490:0:99999:7:::
 nobody:*:19490:0:99999:7:::
 EOF
     chmod 600 /.root/etc/shadow
@@ -153,24 +153,24 @@ auth    sufficient      pam_unix.so nullok
 auth    required        pam_deny.so
 EOF
 
-  if [ ! -d /.root/home/leakos ]; then
+  if [ ! -d /.root/home/live ]; then
     log_msg "Creating home directory for live user..."
-    mkdir -p /.root/home/leakos
-    mkdir -p /.root/home/leakos/{Desktop,Documents,Downloads,Music,Pictures,Videos,Public,Templates}
-    mkdir -p /.root/home/leakos/{.local/share,.config,.cache,.ssh,.gnupg}
-    mkdir -p /.root/home/leakos/{temp,bin}
-    chown -R 1000:1000 /.root/home/leakos
-    chmod 700 /.root/home/leakos
-    chmod 755 /.root/home/leakos/{Desktop,Documents,Downloads,Music,Pictures,Videos,Public,Templates}
-    chmod 700 /.root/home/leakos/{.ssh,.gnupg}
+    mkdir -p /.root/home/live
+    mkdir -p /.root/home/live/{Desktop,Documents,Downloads,Music,Pictures,Videos,Public,Templates}
+    mkdir -p /.root/home/live/{.local/share,.config,.cache,.ssh,.gnupg}
+    mkdir -p /.root/home/live/{temp,bin}
+    chown -R 1000:1000 /.root/home/live
+    chmod 700 /.root/home/live
+    chmod 755 /.root/home/live/{Desktop,Documents,Downloads,Music,Pictures,Videos,Public,Templates}
+    chmod 700 /.root/home/live/{.ssh,.gnupg}
     log_msg "Home directory created"
   else
     log_msg "Home directory exists, ensuring standard folders..."
     for folder in Desktop Documents Downloads Music Pictures Videos Public Templates; do
-      if [ ! -d "/.root/home/leakos/$folder" ]; then
-        mkdir -p "/.root/home/leakos/$folder"
-        chown 1000:1000 "/.root/home/leakos/$folder"
-        chmod 755 "/.root/home/leakos/$folder"
+      if [ ! -d "/.root/home/live/$folder" ]; then
+        mkdir -p "/.root/home/live/$folder"
+        chown 1000:1000 "/.root/home/live/$folder"
+        chmod 755 "/.root/home/live/$folder"
       fi
     done
   fi
@@ -234,9 +234,9 @@ EOF
     log_msg "/etc/skel created"
   fi
 
-  if [ ! -f /.root/home/leakos/.config/user-dirs.dirs ]; then
-    mkdir -p /.root/home/leakos/.config
-    cat > /.root/home/leakos/.config/user-dirs.dirs << 'EOF'
+  if [ ! -f /.root/home/live/.config/user-dirs.dirs ]; then
+    mkdir -p /.root/home/live/.config
+    cat > /.root/home/live/.config/user-dirs.dirs << 'EOF'
 XDG_DESKTOP_DIR="$HOME/Desktop"
 XDG_DOCUMENTS_DIR="$HOME/Documents"
 XDG_DOWNLOAD_DIR="$HOME/Downloads"
@@ -246,23 +246,23 @@ XDG_VIDEOS_DIR="$HOME/Videos"
 XDG_PUBLICSHARE_DIR="$HOME/Public"
 XDG_TEMPLATES_DIR="$HOME/Templates"
 EOF
-    chown -R 1000:1000 /.root/home/leakos/.config
+    chown -R 1000:1000 /.root/home/live/.config
   fi
 
-  if [ ! -f /.root/home/leakos/.config/user-dirs.locale ]; then
-    echo "en_US" > /.root/home/leakos/.config/user-dirs.locale
-    chown 1000:1000 /.root/home/leakos/.config/user-dirs.locale
+  if [ ! -f /.root/home/live/.config/user-dirs.locale ]; then
+    echo "en_US" > /.root/home/live/.config/user-dirs.locale
+    chown 1000:1000 /.root/home/live/.config/user-dirs.locale
   fi
 
-  if [ ! -f /.root/home/leakos/.bashrc ]; then
+  if [ ! -f /.root/home/live/.bashrc ]; then
     log_msg "Copying skel files to live user home..."
-    cp -r /.root/etc/skel/. /.root/home/leakos/ 2>/dev/null || true
-    chown -R 1000:1000 /.root/home/leakos/
+    cp -r /.root/etc/skel/. /.root/home/live/ 2>/dev/null || true
+    chown -R 1000:1000 /.root/home/live/
   fi
 
-  if [ ! -f /.root/home/leakos/.Xresources ]; then
+  if [ ! -f /.root/home/live/.Xresources ]; then
     log_msg "Adding .Xresources for live user..."
-    cat > /.root/home/leakos/.Xresources << 'EOF'
+    cat > /.root/home/live/.Xresources << 'EOF'
 ! ~/.Xresources
 *foreground:                  #00FF00
 *background:                  #000000
@@ -318,8 +318,8 @@ Xcursor.theme:                Adwaita
 Xcursor.size:                 12
 xft.antialias:                true
 EOF
-    chown 1000:1000 /.root/home/leakos/.Xresources
-    chmod 644 /.root/home/leakos/.Xresources
+    chown 1000:1000 /.root/home/live/.Xresources
+    chmod 644 /.root/home/live/.Xresources
     log_msg ".Xresources added"
   fi
 
@@ -446,7 +446,7 @@ done
 # Start udev — daemon DULU, baru trigger
 log_msg "Starting udev..."
 UDEVD=""
-for p in /sbin/udevd /usr/sbin/udevd /lib/udev/udevd /usr/lib/udev/udevd /usr/lib/systemd/systemd-udevd; do
+for p in /usr/bin/udevd /usr/sbin/udevd /sbin/udevd /lib/udev/udevd /usr/lib/udev/udevd /usr/lib/systemd/systemd-udevd; do
   [ -x "$p" ] && UDEVD="$p" && break
 done
 
