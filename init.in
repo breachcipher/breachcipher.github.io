@@ -46,59 +46,124 @@ find_init() {
   return 1
 }
 
-# Auto-detect boot device — support Ventoy (ISO di dalam USB)
+# Auto-detect boot device
+# Prioritas: loop (Ventoy) -> block device (USB/disk) -> optical (fallback)
 find_boot_device() {
   local timeout=90
   local count=0
+  local found_optical=0
 
   log_msg "Auto-detecting boot media (timeout: ${timeout}s)..."
   log_msg "Looking for /boot/lfs.squashfs on available devices..."
 
   mkdir -p "$mnt_tmp" 2>/dev/null
 
+  # Deteksi optical drive di awal — hanya set flag, belum scan
+  for dev in /dev/sr* /dev/cdrom /dev/dvd; do
+    [ -b "$dev" ] && found_optical=1 && break
+  done
+  [ $found_optical -eq 1 ] && log_msg "Optical drive detected, will try as fallback"
+
   while [ $count -lt $timeout ]; do
 
-    # Ventoy: squashfs biasanya di-loop mount dari ISO
+    # PRIORITAS 1: Loop device (Ventoy mount ISO ke /dev/loop*)
     for loopdev in /dev/loop*; do
       [ -b "$loopdev" ] || continue
       if mount -t auto -o ro "$loopdev" "$mnt_tmp" 2>/dev/null; then
         if [ -f "$mnt_tmp/boot/lfs.squashfs" ]; then
           device="$loopdev"
-          log_msg "Boot media DETECTED on loop $loopdev"
+          log_msg "Boot media DETECTED on loop $loopdev (Ventoy)"
           return 0
         fi
         umount "$mnt_tmp" 2>/dev/null
       fi
     done
 
-    # Scan semua block device (USB, disk)
+    # PRIORITAS 2: Block device — urutan: USB -> NVMe -> VirtIO/VirtBlk -> SCSI/SATA lain
+    # Partisi dicek dulu (lebih spesifik), baru disk mentah
+    #
+    # Kelompok device yang di-scan:
+    #   sdb*, sdc*, ...        = USB / removable (skip sda = disk internal pertama)
+    #   nvme*n*p*              = NVMe partisi
+    #   nvme*n*                = NVMe disk
+    #   vda*, vdb*             = VirtIO disk (QEMU/KVM)
+    #   xvda*, xvdb*           = Xen virtual disk
+    #   mmcblk*p*              = eMMC/SD card partisi
+    #   sda*                   = SATA/SCSI pertama (dicek terakhir, biasanya disk internal)
+
+    probe_dev() {
+      local d="$1"
+      [ -b "$d" ] || return 1
+      case "$d" in /dev/sr*|/dev/cdrom|/dev/dvd) return 1 ;; esac
+      local fs
+      fs=$(lsblk -nlo FSTYPE "$d" 2>/dev/null)
+      [ "$fs" = "swap" ] && return 1
+      # Skip disk tanpa fstype yang juga bukan partisi (disk mentah, coba tetap)
+      log_msg "Probing $d (fstype: ${fs:-raw})..."
+      if mount -t auto -o ro "$d" "$mnt_tmp" 2>/dev/null; then
+        if [ -f "$mnt_tmp/boot/lfs.squashfs" ]; then
+          device="$d"
+          log_msg "Boot media DETECTED on $d"
+          return 0
+        fi
+        umount "$mnt_tmp" 2>/dev/null
+      fi
+      return 1
+    }
+
+    # USB removable: sdb, sdc, sdd, ... (partisi dulu, baru disk)
+    for dev in /dev/sdb* /dev/sdc* /dev/sdd* /dev/sde* /dev/sdf*; do
+      probe_dev "$dev" && return 0
+    done
+
+    # NVMe (partisi dulu: nvme0n1p1, nvme1n1p1, ..., lalu disk: nvme0n1)
+    for dev in /dev/nvme*n*p* /dev/nvme*n*; do
+      probe_dev "$dev" && return 0
+    done
+
+    # VirtIO / VirtBlk (vda1, vdb1, ..., lalu vda, vdb)
+    for dev in /dev/vda* /dev/vdb* /dev/vdc*; do
+      probe_dev "$dev" && return 0
+    done
+
+    # Xen virtual disk
+    for dev in /dev/xvda* /dev/xvdb* /dev/xvdc*; do
+      probe_dev "$dev" && return 0
+    done
+
+    # eMMC / SD card
+    for dev in /dev/mmcblk*p* /dev/mmcblk*; do
+      probe_dev "$dev" && return 0
+    done
+
+    # sda terakhir (biasanya disk internal, tapi tetap dicoba)
+    for dev in /dev/sda*; do
+      probe_dev "$dev" && return 0
+    done
+
+    # Fallback: scan semua yang tersisa via lsblk (tangkap device tidak terduga)
     for dev in $(lsblk -pnlo NAME 2>/dev/null); do
-      [ -b "$dev" ] || continue
-      fstype=$(lsblk -nlo FSTYPE "$dev" 2>/dev/null)
-      [ "$fstype" = "swap" ] && continue
-      log_msg "Probing $dev (fstype: ${fstype:-unknown})..."
-      if mount -t auto -o ro "$dev" "$mnt_tmp" 2>/dev/null; then
-        if [ -f "$mnt_tmp/boot/lfs.squashfs" ]; then
-          device="$dev"
-          log_msg "Boot media DETECTED on $dev"
-          return 0
-        fi
-        umount "$mnt_tmp" 2>/dev/null
-      fi
+      case "$dev" in
+        /dev/sd[b-z]*|/dev/nvme*|/dev/vd*|/dev/xvd*|/dev/mmcblk*|/dev/sda*) continue ;;
+      esac
+      probe_dev "$dev" && return 0
     done
 
-    # CD/DVD optical
-    for dev in /dev/sr* /dev/cdrom /dev/dvd /dev/sd*; do
-      [ -b "$dev" ] || continue
-      if mount -t iso9660 -o ro "$dev" "$mnt_tmp" 2>/dev/null; then
-        if [ -f "$mnt_tmp/boot/lfs.squashfs" ]; then
-          device="$dev"
-          log_msg "Boot media DETECTED on optical $dev"
-          return 0
+    # PRIORITAS 3: Optical (fallback — dicoba hanya jika loop & block gagal)
+    if [ $found_optical -eq 1 ]; then
+      log_msg "Loop/block scan failed, trying optical fallback..."
+      for dev in /dev/sr* /dev/cdrom /dev/dvd; do
+        [ -b "$dev" ] || continue
+        if mount -t iso9660 -o ro "$dev" "$mnt_tmp" 2>/dev/null; then
+          if [ -f "$mnt_tmp/boot/lfs.squashfs" ]; then
+            device="$dev"
+            log_msg "Boot media DETECTED on optical $dev"
+            return 0
+          fi
+          umount "$mnt_tmp" 2>/dev/null
         fi
-        umount "$mnt_tmp" 2>/dev/null
-      fi
-    done
+      done
+    fi
 
     sleep 2
     count=$((count + 2))
@@ -341,7 +406,7 @@ do_mount_root() {
     vfat fat nls_cp437 nls_iso8859_1 \
     iso9660 udf \
     squashfs overlay loop \
-    dm_mod \
+    dm_mod e1000 e1000e pcnet32 \
     cfg80211 mac80211 \
     iwlwifi rtlwifi rtl8xxxu ath9k \
     rtl8192ce 8188eu
