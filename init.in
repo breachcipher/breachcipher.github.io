@@ -1,6 +1,6 @@
 #!/bin/sh
 # Init script for custom LFS Live ISO - Coreutils version (no BusyBox)
-# Compatible: Ventoy, Rufus, direct ISO boot, USB, CD/DVD
+# Auto-detect boot media, robust /proc mount handling
 
 PATH=/usr/bin:/usr/sbin:/bin:/sbin
 export PATH
@@ -8,13 +8,11 @@ export PATH
 DEBUG=false
 rootdelay=
 
-# FIX: mnt_tmp sebagai GLOBAL (bukan local di dalam fungsi)
+# FIX: mnt_tmp sebagai GLOBAL
 mnt_tmp="/tmpmnt"
 
 log_msg() {
   local msg="[INIT] $*"
-  # Tulis ke kmsg saja (kernel akan tampilkan ke console)
-  # Jika kmsg tidak tersedia, baru echo ke stdout
   if ! echo "$msg" > /dev/kmsg 2>/dev/null; then
     echo "$msg"
   fi
@@ -46,151 +44,41 @@ find_init() {
   return 1
 }
 
-# Auto-detect boot device
-# Prioritas: loop (Ventoy) -> block device (USB/disk) -> optical (fallback)
+# Auto-detect boot device by scanning block devices and checking for squashfs file
 find_boot_device() {
   local timeout=90
   local count=0
-  local found_optical=0
 
   log_msg "Auto-detecting boot media (timeout: ${timeout}s)..."
   log_msg "Looking for /boot/lfs.squashfs on available devices..."
 
   mkdir -p "$mnt_tmp" 2>/dev/null
 
-  # Deteksi optical drive di awal — hanya set flag, belum scan
-  for dev in /dev/sr* /dev/cdrom /dev/dvd; do
-    [ -b "$dev" ] && found_optical=1 && break
-  done
-  [ $found_optical -eq 1 ] && log_msg "Optical drive detected, will try as fallback"
-
   while [ $count -lt $timeout ]; do
+    for dev in $(lsblk -pnlo NAME); do
+      if [ -b "$dev" ]; then
+        log_msg "Probing device $dev..."
 
-    # PRIORITAS 1: Loop device (Ventoy mount ISO ke /dev/loop*)
-    # Hanya probe loop yang BENAR-BENAR sedang dipakai (losetup -l)
-    for loopdev in $(losetup -l -n -O NAME 2>/dev/null); do
-      [ -b "$loopdev" ] || continue
-      log_msg "Probing active loop $loopdev..."
-      if mount -t auto -o ro "$loopdev" "$mnt_tmp" 2>/dev/null; then
-        if [ -f "$mnt_tmp/boot/lfs.squashfs" ]; then
-          device="$loopdev"
-          log_msg "Boot media DETECTED on loop $loopdev (Ventoy)"
-          return 0
-        fi
-        umount "$mnt_tmp" 2>/dev/null
-      fi
-    done
-
-    # PRIORITAS 2: Block device — urutan: USB -> NVMe -> VirtIO/VirtBlk -> SCSI/SATA lain
-    # Partisi dicek dulu (lebih spesifik), baru disk mentah
-    #
-    # Kelompok device yang di-scan:
-    #   sdb*, sdc*, ...        = USB / removable (skip sda = disk internal pertama)
-    #   nvme*n*p*              = NVMe partisi
-    #   nvme*n*                = NVMe disk
-    #   vda*, vdb*             = VirtIO disk (QEMU/KVM)
-    #   xvda*, xvdb*           = Xen virtual disk
-    #   mmcblk*p*              = eMMC/SD card partisi
-    #   sda*                   = SATA/SCSI pertama (dicek terakhir, biasanya disk internal)
-
-    probe_dev() {
-      local d="$1"
-      [ -b "$d" ] || return 1
-      # Skip optical, loop mentah, swap
-      case "$d" in
-        /dev/sr*|/dev/cdrom|/dev/dvd) return 1 ;;
-        /dev/loop*)                   return 1 ;;  # loop sudah ditangani prioritas 1
-      esac
-      local fs type
-      fs=$(lsblk -nlo FSTYPE "$d" 2>/dev/null)
-      type=$(lsblk -nlo TYPE "$d" 2>/dev/null)
-      # Skip swap
-      [ "$fs" = "swap" ] && return 1
-      # Skip disk mentah (type=disk) yang tidak punya fstype — kemungkinan besar MBR/GPT disk
-      # Kecuali jika tidak ada partisi sama sekali di dalamnya
-      if [ "$type" = "disk" ] && [ -z "$fs" ]; then
-        local has_part
-        has_part=$(lsblk -nlo NAME "$d" 2>/dev/null | grep -v "^$(basename $d)$" | wc -l)
-        [ "$has_part" -gt 0 ] && return 1  # ada partisi, skip disk — probe partisinya saja
-      fi
-      log_msg "Probing $d (type: ${type:-?}, fstype: ${fs:-raw})..."
-      if mount -t auto -o ro "$d" "$mnt_tmp" 2>/dev/null; then
-        if [ -f "$mnt_tmp/boot/lfs.squashfs" ]; then
-          device="$d"
-          log_msg "Boot media DETECTED on $d"
-          return 0
-        fi
-        umount "$mnt_tmp" 2>/dev/null
-      fi
-      return 1
-    }
-
-    # USB removable: sdb, sdc, sdd, ... (partisi dulu, baru disk)
-    for dev in /dev/sdb* /dev/sdc* /dev/sdd* /dev/sde* /dev/sdf*; do
-      probe_dev "$dev" && return 0
-    done
-
-    # NVMe (partisi dulu: nvme0n1p1, nvme1n1p1, ..., lalu disk: nvme0n1)
-    for dev in /dev/nvme*n*p* /dev/nvme*n*; do
-      probe_dev "$dev" && return 0
-    done
-
-    # VirtIO / VirtBlk (vda1, vdb1, ..., lalu vda, vdb)
-    for dev in /dev/vda* /dev/vdb* /dev/vdc*; do
-      probe_dev "$dev" && return 0
-    done
-
-    # Xen virtual disk
-    for dev in /dev/xvda* /dev/xvdb* /dev/xvdc*; do
-      probe_dev "$dev" && return 0
-    done
-
-    # eMMC / SD card
-    for dev in /dev/mmcblk*p* /dev/mmcblk*; do
-      probe_dev "$dev" && return 0
-    done
-
-    # sda terakhir (biasanya disk internal, tapi tetap dicoba)
-    for dev in /dev/sda*; do
-      probe_dev "$dev" && return 0
-    done
-
-    # Fallback: scan semua yang tersisa via lsblk (tangkap device tidak terduga)
-    for dev in $(lsblk -pnlo NAME 2>/dev/null); do
-      case "$dev" in
-        /dev/sd[b-z]*|/dev/nvme*|/dev/vd*|/dev/xvd*|/dev/mmcblk*|/dev/sda*) continue ;;
-      esac
-      probe_dev "$dev" && return 0
-    done
-
-    # PRIORITAS 3: Optical (fallback — dicoba hanya jika loop & block gagal)
-    if [ $found_optical -eq 1 ]; then
-      log_msg "Loop/block scan failed, trying optical fallback..."
-      for dev in /dev/sr* /dev/cdrom /dev/dvd; do
-        [ -b "$dev" ] || continue
-        if mount -t iso9660 -o ro "$dev" "$mnt_tmp" 2>/dev/null; then
+        if mount -t auto -o ro "$dev" "$mnt_tmp" 2>/dev/null; then
           if [ -f "$mnt_tmp/boot/lfs.squashfs" ]; then
             device="$dev"
-            log_msg "Boot media DETECTED on optical $dev"
+            log_msg "Boot media DETECTED on $dev (found /boot/lfs.squashfs)"
             return 0
+          else
+            umount "$mnt_tmp" 2>/dev/null
           fi
-          umount "$mnt_tmp" 2>/dev/null
         fi
-      done
-    fi
+      fi
+    done
 
     sleep 2
     count=$((count + 2))
-    [ $((count % 10)) -eq 0 ] && log_msg "Still scanning... (${count}s elapsed)"
+    [ $((count % 10)) -eq 0 ] && log_msg "Still scanning... (${count}s)"
   done
 
   log_msg "ERROR: No valid boot media found after ${timeout}s"
-  log_msg "--- blkid output ---"
-  blkid 2>/dev/null || true
-  log_msg "--- lsblk output ---"
+  blkid
   lsblk -f 2>/dev/null || true
-  log_msg "--- /proc/mounts ---"
-  cat /proc/mounts 2>/dev/null || true
   problem
   return 1
 }
@@ -233,7 +121,7 @@ auth    required        pam_deny.so
 EOF
 
   if [ ! -d /.root/home/live ]; then
-    log_msg "Creating home directory for live user..."
+    log_msg "Creating home directory for live user with standard folders..."
     mkdir -p /.root/home/live
     mkdir -p /.root/home/live/{Desktop,Documents,Downloads,Music,Pictures,Videos,Public,Templates}
     mkdir -p /.root/home/live/{.local/share,.config,.cache,.ssh,.gnupg}
@@ -242,7 +130,7 @@ EOF
     chmod 700 /.root/home/live
     chmod 755 /.root/home/live/{Desktop,Documents,Downloads,Music,Pictures,Videos,Public,Templates}
     chmod 700 /.root/home/live/{.ssh,.gnupg}
-    log_msg "Home directory created"
+    log_msg "Created standard folders for live user"
   else
     log_msg "Home directory exists, ensuring standard folders..."
     for folder in Desktop Documents Downloads Music Pictures Videos Public Templates; do
@@ -255,16 +143,25 @@ EOF
   fi
 
   if [ ! -d /.root/etc/skel ]; then
-    log_msg "Creating /etc/skel..."
+    log_msg "Creating /etc/skel with standard folders..."
     mkdir -p /.root/etc/skel
     mkdir -p /.root/etc/skel/{Desktop,Documents,Downloads,Music,Pictures,Videos,Public,Templates}
     mkdir -p /.root/etc/skel/{.local/share,.config,.cache}
 
     cat > /.root/etc/skel/README.txt << 'EOF'
-Welcome to LeakOS!
+Welcome to your new LFS system!
 
-Standard folders:
-- Desktop, Documents, Downloads, Music, Pictures, Videos, Public, Templates
+This is your home directory. Standard folders have been created:
+- Desktop    : For desktop files
+- Documents  : For documents
+- Downloads  : For downloaded files
+- Music      : For music files
+- Pictures   : For images
+- Videos     : For video files
+- Public     : For shared files
+- Templates  : For document templates
+
+Enjoy your LFS experience!
 EOF
 
     cat > /.root/etc/skel/.bashrc << 'EOF'
@@ -310,7 +207,7 @@ EOF
 EOF
 
     chmod 644 /.root/etc/skel/.bashrc /.root/etc/skel/.profile
-    log_msg "/etc/skel created"
+    log_msg "/etc/skel created with standard configuration"
   fi
 
   if [ ! -f /.root/home/live/.config/user-dirs.dirs ]; then
@@ -402,85 +299,72 @@ EOF
     log_msg ".Xresources added"
   fi
 
-  log_msg "User setup complete"
+  log_msg "User setup complete with all standard folders"
 }
 
 
 do_mount_root() {
   log_msg "Mounting root filesystem (squashfs + overlay)"
 
-  # Load modules — storage dulu, fs kemudian
-  for mod in \
-    xhci_hcd xhci_pci ehci_pci ehci_hcd uhci_hcd ohci_hcd \
-    usb-storage uas \
-    sr_mod cdrom \
-    virtio virtio_pci virtio_blk virtio_scsi virtio_net virtio_gpu \
-    vboxvideo vmwgfx \
-    drm drm_kms_helper \
-    vfat fat nls_cp437 nls_iso8859_1 \
-    iso9660 udf e1000 e1000e pcnet32 \
-    squashfs overlay loop \
-    dm_mod \
-    cfg80211 mac80211 \
-    iwlwifi rtlwifi rtl8xxxu ath9k \
-    rtl8192ce 8188eu
-  do
-    modprobe -q "$mod" 2>/dev/null || true
-  done
+  modprobe -q squashfs || true
+  modprobe -q overlay  || true
+  modprobe -q loop     || true
+  modprobe -q vfat     || true
+  modprobe -q iso9660  || true
+  modprobe -q usb-storage || true
+  modprobe -q sr_mod   || true
+  modprobe -q xhci_hcd || true
+  modprobe -q ehci_hcd || true
+  modprobe -q e1000    || true
+  modprobe -q e1000e  || true
+  modprobe -q pcnet32 || true
+  modprobe -q uhci_hcd || true
+  modprobe -q vboxvideo   || true
+  modprobe -q virtio_gpu  || true
+  modprobe -q vmwgfx   || true
+  modprobe -q drm      || true
+  modprobe -q virtio_net  || true
+  modprobe -q loop max_loop=64 || true
+  modprobe -q dm_mod   || true
 
-  mkdir -p /.root /mnt /squash /cow/mod /cow/buffer "$mnt_tmp"
+  mkdir -p /.root /mnt /squash /cow/mod /cow/buffer
 
-  # Pastikan minimal 8 loop device tersedia
-  for i in 0 1 2 3 4 5 6 7; do
-    [ -b "/dev/loop$i" ] || mknod "/dev/loop$i" b 7 "$i" 2>/dev/null || true
-  done
-
-  # Tunggu device USB settle (penting untuk Ventoy/Rufus)
-  log_msg "Waiting for storage devices to settle..."
-  udevadm settle --timeout=10 2>/dev/null || sleep 3
+  [ -b /dev/loop0 ] || mknod /dev/loop0 b 7 0
 
   if ! find_boot_device; then
     return 1
   fi
 
-  # Move mount ke /mnt
+  # Move or mount to /mnt
   if mountpoint -q "$mnt_tmp" 2>/dev/null; then
-    mount --move "$mnt_tmp" /mnt || { log_msg "mount --move failed, trying bind"; mount --bind "$mnt_tmp" /mnt || problem; }
+    mount --move "$mnt_tmp" /mnt || problem
   else
-    mount -t auto -o ro "$device" /mnt || { log_msg "Mount $device failed"; problem; }
+    mount -t auto "$device" /mnt || { log_msg "Mount $device failed"; problem; }
   fi
   log_msg "Boot media mounted at /mnt"
 
-  if [ ! -f /mnt/boot/lfs.squashfs ]; then
-    log_msg "ERROR: lfs.squashfs not found!"
-    ls -la /mnt/ 2>/dev/null
-    ls -la /mnt/boot/ 2>/dev/null || true
-    problem
-  fi
+  [ -f /mnt/boot/lfs.squashfs ] || { log_msg "lfs.squashfs missing!"; ls -la /mnt/boot/; problem; }
 
-  mount -t squashfs -o loop,ro /mnt/boot/lfs.squashfs /squash || { log_msg "squashfs mount failed!"; problem; }
+  mount -t squashfs -o loop /mnt/boot/lfs.squashfs /squash || problem
   log_msg "squashfs mounted at /squash"
 
-  mount -t tmpfs -o mode=755 tmpfs /cow || problem
+  mount -t tmpfs tmpfs /cow || problem
   mkdir -p /cow/mod /cow/buffer
 
-  # FIX: Buat direktori penting di upperdir (cow/mod) SEBELUM overlay di-mount
-  # Sehingga direktori sudah ada di /.root setelah overlay aktif
+  # Buat direktori di upperdir SEBELUM overlay di-mount
   mkdir -p /cow/mod/dev /cow/mod/proc /cow/mod/sys /cow/mod/run
   mkdir -p /cow/mod/mnt/changes /cow/mod/mnt/container
   mkdir -p /cow/mod/dev/pts
 
-  mount -t overlay overlay \
-    -o lowerdir=/squash,upperdir=/cow/mod,workdir=/cow/buffer \
-    /.root || { log_msg "overlay mount failed!"; problem; }
+  mount -t overlay -o lowerdir=/squash,upperdir=/cow/mod,workdir=/cow/buffer overlay /.root || problem
   log_msg "Overlay mounted at /.root"
 
   ensure_users
 
   mount --bind /cow/mod /.root/mnt/changes || true
-  mount --bind /mnt /.root/mnt/container || true
+  mount --bind /mnt /.root/mnt/container   || true
 
-  # Bind pseudo-fs ke new root (WAJIB sebelum switch_root)
+  # Bind pseudo-fs ke new root
   log_msg "Binding pseudo-filesystems to new root..."
   mount --bind /dev  /.root/dev  || log_msg "WARNING: bind /dev failed"
   mount --bind /proc /.root/proc || log_msg "WARNING: bind /proc failed"
@@ -499,17 +383,17 @@ log_msg "=== LeakOS Live ISO Init Starting ==="
 mkdir -p /proc /sys /dev /run /tmp 2>/dev/null
 
 log_msg "Mounting pseudo-filesystems..."
-mount -t devtmpfs devtmpfs /dev 2>/dev/null || { log_msg "devtmpfs failed, trying mdev fallback"; mdev -s 2>/dev/null || true; }
-mount -t proc proc /proc || { log_msg "CRITICAL: proc mount failed!"; exec /bin/sh; }
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || { log_msg "devtmpfs failed"; /bin/sh; }
+mount -t proc proc /proc || { log_msg "CRITICAL: proc mount failed!"; /bin/sh; }
 mount -t sysfs sysfs /sys 2>/dev/null || log_msg "sysfs mount failed (non-fatal)"
 mount -t tmpfs tmpfs /run 2>/dev/null || log_msg "tmpfs /run failed (non-fatal)"
 mkdir -p /dev/pts
-mount -t devpts devpts /dev/pts -o gid=5,mode=620 2>/dev/null || log_msg "devpts mount failed (non-fatal)"
+mount -t devpts devpts /dev/pts -o gid=5,mode=620 2>/dev/null || log_msg "devpts mount failed"
 
 if [ ! -r /proc/cmdline ]; then
   log_msg "WARNING: /proc/cmdline missing - remounting /proc"
   umount /proc 2>/dev/null
-  mount -t proc proc /proc || { log_msg "Cannot remount /proc!"; exec /bin/sh; }
+  mount -t proc proc /proc || { log_msg "Cannot remount /proc!"; /bin/sh; }
 fi
 
 cmdline=$(cat /proc/cmdline 2>/dev/null || echo "")
@@ -535,8 +419,7 @@ if [ -z "$UDEVD" ]; then
 else
   $UDEVD --daemon --resolve-names=never 2>/dev/null
   sleep 1
-  udevadm trigger --action=add --type=subsystems 2>/dev/null || true
-  udevadm trigger --action=add --type=devices 2>/dev/null || true
+  udevadm trigger --action=add 2>/dev/null || true
   udevadm settle --timeout=30 2>/dev/null || true
   log_msg "udev ready"
 fi
@@ -556,8 +439,6 @@ if [ -z "$INIT_PATH" ]; then
   ls -la /.root/sbin/ 2>/dev/null || true
   log_msg "Contents of /.root/usr/sbin:"
   ls -la /.root/usr/sbin/ 2>/dev/null || true
-  log_msg "Contents of /.root/usr/lib/systemd:"
-  ls -la /.root/usr/lib/systemd/ 2>/dev/null || true
   problem
 fi
 
