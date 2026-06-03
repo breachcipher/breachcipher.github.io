@@ -1,6 +1,5 @@
 #!/bin/sh
-# Init script for custom LFS Live ISO - Coreutils version (no BusyBox)
-# Auto-detect boot media, robust /proc mount handling
+# Init script for LeakOS Live ISO - Fixed overlay writable issue
 
 PATH=/usr/bin:/usr/sbin:/bin:/sbin
 export PATH
@@ -33,12 +32,12 @@ find_boot_device() {
     local mnt_tmp_local="/tmpmnt_detect"
 
     log_msg "Auto-detecting boot media (timeout: ${timeout}s)..."
-    log_msg "Looking for /boot/lfs.squashfs on available devices..."
+    log_msg "Looking for lfs.squashfs on available devices..."
 
     mkdir -p "$mnt_tmp_local" 2>/dev/null
 
     while [ $count -lt $timeout ]; do
-        for dev in $(lsblk -pnlo NAME 2>/dev/null || echo ""); do
+        for dev in $(lsblk -pnlo NAME 2>/dev/null | grep -E '^(/dev/sd|/dev/hd|/dev/nvme|/dev/vd|/dev/mmc)' | head -10); do
             if [ -n "$dev" ] && [ -b "$dev" ]; then
                 log_msg "Probing device $dev..."
 
@@ -47,12 +46,33 @@ find_boot_device() {
                     if [ -f "$mnt_tmp_local/boot/lfs.squashfs" ]; then
                         device="$dev"
                         log_msg "Boot media DETECTED on $dev (found /boot/lfs.squashfs)"
-                        # Keep mounted for caller
                         echo "$mnt_tmp_local" > /tmp/boot_mount_point
                         return 0
                     elif [ -f "$mnt_tmp_local/lfs.squashfs" ]; then
                         device="$dev"
                         log_msg "Boot media DETECTED on $dev (found /lfs.squashfs)"
+                        echo "$mnt_tmp_local" > /tmp/boot_mount_point
+                        return 0
+                    elif [ -f "$mnt_tmp_local/root.squashfs" ]; then
+                        device="$dev"
+                        log_msg "Boot media DETECTED on $dev (found /root.squashfs)"
+                        echo "$mnt_tmp_local" > /tmp/boot_mount_point
+                        return 0
+                    else
+                        umount "$mnt_tmp_local" 2>/dev/null
+                    fi
+                fi
+            fi
+        done
+
+        # Also check CDROM devices
+        for dev in /dev/sr0 /dev/cdrom; do
+            if [ -b "$dev" ]; then
+                log_msg "Probing CDROM $dev..."
+                if mount -t iso9660 -o ro "$dev" "$mnt_tmp_local" 2>/dev/null; then
+                    if [ -f "$mnt_tmp_local/boot/lfs.squashfs" ]; then
+                        device="$dev"
+                        log_msg "Boot media DETECTED on $dev"
                         echo "$mnt_tmp_local" > /tmp/boot_mount_point
                         return 0
                     else
@@ -69,9 +89,8 @@ find_boot_device() {
 
     log_msg "ERROR: No valid boot media found after ${timeout}s"
     
-    # Debug: list all block devices
     log_msg "Available block devices:"
-    lsblk -pnlo NAME,SIZE,FSTYPE 2>/dev/null | while read line; do log_msg "  $line"; done
+    lsblk 2>/dev/null || true
     
     problem
     return 1
@@ -82,12 +101,10 @@ find_boot_device() {
 ensure_users() {
     log_msg "Ensuring user database exists in overlay..."
     
-    # Create essential directories
-    mkdir -p /.root/etc /.root/home /.root/root
+    mkdir -p /.root/etc /.root/home /.root/root /.root/var /tmp/overlay-work
     
-    # Create /etc/passwd if missing
-    if [ ! -f /.root/etc/passwd ] || [ ! -s /.root/etc/passwd ]; then
-        log_msg "Creating minimal /etc/passwd in overlay..."
+    # Create /etc/passwd
+    if [ ! -f /.root/etc/passwd ]; then
         cat > /.root/etc/passwd << 'EOF'
 root:x:0:0:root:/root:/bin/bash
 leakos:x:1000:1000:Live User:/home/leakos:/bin/bash
@@ -95,9 +112,8 @@ nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin
 EOF
     fi
     
-    # Create /etc/group if missing
-    if [ ! -f /.root/etc/group ] || [ ! -s /.root/etc/group ]; then
-        log_msg "Creating minimal /etc/group in overlay..."
+    # Create /etc/group
+    if [ ! -f /.root/etc/group ]; then
         cat > /.root/etc/group << 'EOF'
 root:x:0:
 leakos:x:1000:
@@ -106,9 +122,8 @@ users:x:100:
 EOF
     fi
     
-    # Create /etc/shadow if missing
-    if [ ! -f /.root/etc/shadow ] || [ ! -s /.root/etc/shadow ]; then
-        log_msg "Creating minimal /etc/shadow in overlay..."
+    # Create /etc/shadow
+    if [ ! -f /.root/etc/shadow ]; then
         cat > /.root/etc/shadow << 'EOF'
 root::19490:0:99999:7:::
 leakos::19490:0:99999:7:::
@@ -117,215 +132,17 @@ EOF
         chmod 600 /.root/etc/shadow 2>/dev/null
     fi
     
-    # Create /etc/pam.d directory and basic config
-    mkdir -p /.root/etc/pam.d
-    
-    if [ ! -f /.root/etc/pam.d/common-auth ]; then
-        cat > /.root/etc/pam.d/common-auth << 'EOF'
-auth    sufficient      pam_unix.so nullok
-auth    required        pam_deny.so
-EOF
-    fi
-    
-    # Create home directory for live user
+    # Create home directory
     if [ ! -d /.root/home/leakos ]; then
-        log_msg "Creating home directory for live user with standard folders..."
-        mkdir -p /.root/home/leakos
-        
-        # Standard XDG user directories
-        for folder in Desktop Documents Downloads Music Pictures Videos Public Templates; do
-            mkdir -p "/.root/home/leakos/$folder"
-        done
-        
-        # Hidden directories
-        for folder in .local/share .config .cache .ssh .gnupg; do
-            mkdir -p "/.root/home/leakos/$folder"
-        done
-        
-        # Application directories
-        mkdir -p /.root/home/leakos/{temp,bin,.local/bin}
-        
-        # Set permissions
+        mkdir -p /.root/home/leakos/{Desktop,Documents,Downloads,Music,Pictures,Videos,Public,Templates}
+        mkdir -p /.root/home/leakos/.config /.root/home/leakos/.cache
         chown -R 1000:1000 /.root/home/leakos 2>/dev/null
-        chmod 700 /.root/home/leakos 2>/dev/null
-        chmod 755 /.root/home/leakos/* 2>/dev/null
-        chmod 700 /.root/home/leakos/.ssh /.root/home/leakos/.gnupg 2>/dev/null
-        
-        log_msg "Created standard folders for live user"
-    fi
-    
-    # Create /etc/skel template
-    if [ ! -d /.root/etc/skel ]; then
-        log_msg "Creating /etc/skel with standard configuration..."
-        mkdir -p /.root/etc/skel
-        
-        # Standard folders in skel
-        for folder in Desktop Documents Downloads Music Pictures Videos Public Templates; do
-            mkdir -p "/.root/etc/skel/$folder"
-        done
-        
-        for folder in .local/share .config .cache; do
-            mkdir -p "/.root/etc/skel/$folder"
-        done
-        
-        # Create .bashrc
-        cat > /.root/etc/skel/.bashrc << 'EOF'
-# ~/.bashrc
-
-# If not running interactively, don't do anything
-case $- in
-    *i*) ;;
-      *) return;;
-esac
-
-# History settings
-HISTCONTROL=ignoreboth
-HISTSIZE=1000
-HISTFILESIZE=2000
-
-# Check window size
-shopt -s checkwinsize
-
-# Color prompt
-if [ -x /usr/bin/tput ] && tput setaf 1 >&/dev/null; then
-    PS1='\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
-else
-    PS1='\u@\h:\w\$ '
-fi
-
-# Color support for ls
-if [ -x /usr/bin/dircolors ]; then
-    alias ls='ls --color=auto'
-    alias grep='grep --color=auto'
-fi
-
-# Aliases
-alias ll='ls -alF'
-alias la='ls -A'
-alias l='ls -CF'
-EOF
-        
-        # Create .profile
-        cat > /.root/etc/skel/.profile << 'EOF'
-# ~/.profile
-
-if [ -n "$BASH_VERSION" ]; then
-    if [ -f "$HOME/.bashrc" ]; then
-        . "$HOME/.bashrc"
-    fi
-fi
-
-# User bin directories
-if [ -d "$HOME/bin" ]; then
-    PATH="$HOME/bin:$PATH"
-fi
-if [ -d "$HOME/.local/bin" ]; then
-    PATH="$HOME/.local/bin:$PATH"
-fi
-export PATH
-EOF
-        
-        chmod 644 /.root/etc/skel/.bashrc /.root/etc/skel/.profile 2>/dev/null
-        log_msg "/etc/skel created"
-    fi
-    
-    # Copy skel files to home if needed
-    if [ ! -f /.root/home/leakos/.bashrc ]; then
-        log_msg "Copying skel files to live user home..."
-        cp -r /.root/etc/skel/. /.root/home/leakos/ 2>/dev/null || true
-        chown -R 1000:1000 /.root/home/leakos/ 2>/dev/null
-    fi
-    
-    # Create .Xresources
-    if [ ! -f /.root/home/leakos/.Xresources ]; then
-        cat > /.root/home/leakos/.Xresources << 'EOF'
-! X resources
-Xft.dpi: 96
-Xft.antialias: true
-Xft.hinting: true
-Xft.rgba: rgb
-
-! URxvt settings
-URxvt.font: xft:Monospace:size=10
-URxvt.background: #000000
-URxvt.foreground: #00FF00
-URxvt.cursorColor: #00FF00
-URxvt.scrollBar: false
-URxvt.saveLines: 10000
-EOF
-        chown 1000:1000 /.root/home/leakos/.Xresources 2>/dev/null
-    fi
-    
-    # Create XDG user dirs config
-    if [ ! -f /.root/home/leakos/.config/user-dirs.dirs ]; then
-        mkdir -p /.root/home/leakos/.config
-        cat > /.root/home/leakos/.config/user-dirs.dirs << 'EOF'
-XDG_DESKTOP_DIR="$HOME/Desktop"
-XDG_DOCUMENTS_DIR="$HOME/Documents"
-XDG_DOWNLOAD_DIR="$HOME/Downloads"
-XDG_MUSIC_DIR="$HOME/Music"
-XDG_PICTURES_DIR="$HOME/Pictures"
-XDG_VIDEOS_DIR="$HOME/Videos"
-XDG_PUBLICSHARE_DIR="$HOME/Public"
-XDG_TEMPLATES_DIR="$HOME/Templates"
-EOF
-        chown -R 1000:1000 /.root/home/leakos/.config 2>/dev/null
     fi
     
     log_msg "User setup complete"
 }
 
 # ===================== ROOT FILESYSTEM SETUP =====================
-
-verify_root_filesystem() {
-    log_msg "Verifying root filesystem integrity..."
-    
-    # Check for init
-    if [ ! -x "/.root/sbin/init" ] && [ ! -x "/.root/bin/init" ] && [ ! -x "/.root/init" ]; then
-        log_msg "ERROR: No init found in /.root!"
-        log_msg "Contents of /.root:"
-        ls -la /.root/ 2>/dev/null | while read line; do log_msg "  $line"; done
-        
-        # Check if squashfs was empty
-        if [ -d /squash ]; then
-            log_msg "Contents of squashfs:"
-            ls -la /squash/ 2>/dev/null | while read line; do log_msg "  $line"; done
-        fi
-        
-        # Try to find init anywhere
-        init_path=$(find /.root -name "init" -type f -executable 2>/dev/null | head -1)
-        if [ -n "$init_path" ]; then
-            log_msg "Found init at $init_path, creating symlink..."
-            ln -sf "$init_path" /.root/sbin/init 2>/dev/null || true
-            ln -sf "$init_path" /.root/init 2>/dev/null || true
-        else
-            log_msg "CRITICAL: No init system found in root filesystem!"
-            return 1
-        fi
-    fi
-    
-    # Verify essential directories
-    for dir in proc sys dev run tmp var; do
-        if [ ! -d "/.root/$dir" ]; then
-            log_msg "Creating essential directory: /.root/$dir"
-            mkdir -p "/.root/$dir"
-        fi
-    done
-    
-    # Verify essential files
-    if [ ! -f "/.root/etc/fstab" ]; then
-        log_msg "Creating minimal /etc/fstab..."
-        cat > /.root/etc/fstab << 'EOF'
-proc            /proc           proc    defaults        0       0
-sysfs           /sys            sysfs   defaults        0       0
-devtmpfs        /dev            devtmpfs defaults      0       0
-tmpfs           /tmp            tmpfs   defaults        0       0
-EOF
-    fi
-    
-    log_msg "Root filesystem verification complete"
-    return 0
-}
 
 do_mount_root() {
     local boot_mount_point
@@ -334,12 +151,12 @@ do_mount_root() {
     
     # Load kernel modules
     log_msg "Loading kernel modules..."
-    for mod in squashfs overlay loop vfat iso9660 usb-storage sr_mod; do
-        modprobe -q "$mod" 2>/dev/null && log_msg "  Loaded $mod" || log_msg "  Failed to load $mod (non-fatal)"
-    done
+    modprobe -q squashfs 2>/dev/null && log_msg "  Loaded squashfs" || log_msg "  squashfs module missing"
+    modprobe -q overlay 2>/dev/null && log_msg "  Loaded overlay" || log_msg "  overlay module missing"
+    modprobe -q loop 2>/dev/null && log_msg "  Loaded loop" || log_msg "  loop module missing"
     
     # Create mount points
-    mkdir -p /.root /mnt /squash /cow /cow/mod /cow/buffer 2>/dev/null
+    mkdir -p /.root /mnt /squash /cow /cow/upper /cow/work 2>/dev/null
     
     # Auto-detect boot device
     if ! find_boot_device; then
@@ -356,7 +173,7 @@ do_mount_root() {
     fi
     
     # Move or mount to /mnt
-    if mountpoint -q "$boot_mount_point"; then
+    if mountpoint -q "$boot_mount_point" 2>/dev/null; then
         log_msg "Moving boot media from $boot_mount_point to /mnt"
         mount --move "$boot_mount_point" /mnt || {
             log_msg "Failed to move mount point"
@@ -374,9 +191,9 @@ do_mount_root() {
     
     log_msg "Boot media mounted at /mnt"
     
-    # Find squashfs file (check multiple locations)
+    # Find squashfs file
     SQUASHFS_PATH=""
-    for path in /mnt/boot/lfs.squashfs /mnt/lfs.squashfs /mnt/root.squashfs /mnt/filesystem.squashfs; do
+    for path in /mnt/boot/lfs.squashfs /mnt/lfs.squashfs /mnt/root.squashfs; do
         if [ -f "$path" ]; then
             SQUASHFS_PATH="$path"
             log_msg "Found squashfs at $SQUASHFS_PATH"
@@ -387,16 +204,14 @@ do_mount_root() {
     if [ -z "$SQUASHFS_PATH" ]; then
         log_msg "ERROR: No squashfs file found!"
         log_msg "Contents of /mnt:"
-        ls -la /mnt/ 2>/dev/null | while read line; do log_msg "  $line"; done
-        log_msg "Contents of /mnt/boot:"
-        ls -la /mnt/boot/ 2>/dev/null | while read line; do log_msg "  $line"; done
+        ls -la /mnt/ 2>/dev/null || true
         problem
         return 1
     fi
     
     # Mount squashfs
     log_msg "Mounting squashfs from $SQUASHFS_PATH"
-    mount -t squashfs -o loop "$SQUASHFS_PATH" /squash || {
+    mount -t squashfs -o loop,ro "$SQUASHFS_PATH" /squash || {
         log_msg "ERROR: Failed to mount squashfs!"
         problem
         return 1
@@ -410,66 +225,89 @@ do_mount_root() {
         return 1
     fi
     
-    log_msg "Squashfs contains: $(ls /squash 2>/dev/null | head -5 | tr '\n' ' ')"
-    
-    # Mount tmpfs for overlay
-    log_msg "Mounting tmpfs for overlay"
-    mount -t tmpfs tmpfs /cow || {
+    # FIX: Mount tmpfs for overlay dengan ukuran yang cukup
+    log_msg "Mounting tmpfs for overlay (512MB)..."
+    mount -t tmpfs -o size=512M,mode=755 tmpfs /cow || {
         log_msg "ERROR: Failed to mount tmpfs on /cow"
         problem
         return 1
     }
     
-    # Create working directories
-    mkdir -p /cow/mod /cow/buffer
+    # Create working directories with proper structure
+    mkdir -p /cow/upper /cow/work
     
-    # Mount overlay
-    log_msg "Mounting overlay filesystem"
-    mount -t overlay overlay -o lowerdir=/squash,upperdir=/cow/mod,workdir=/cow/buffer /.root || {
+    # FIX: Check if filesystem supports xattr (required for overlay)
+    log_msg "Testing tmpfs for xattr support..."
+    if ! attr -l /cow 2>/dev/null && ! getfattr -d /cow 2>/dev/null; then
+        log_msg "Warning: tmpfs may not support xattr, but continuing..."
+    fi
+    
+    # FIX: Mount overlay dengan options yang benar
+    log_msg "Mounting overlay filesystem..."
+    mount -t overlay overlay \
+        -o lowerdir=/squash,upperdir=/cow/upper,workdir=/cow/work \
+        /.root 2>&1 | while read line; do log_msg "  overlay: $line"; done
+    
+    if ! mountpoint -q /.root; then
         log_msg "ERROR: Failed to mount overlay!"
-        log_msg "Check: lowerdir=/squash, upperdir=/cow/mod, workdir=/cow/buffer"
-        problem
-        return 1
-    }
+        
+        # Try alternative: use ramfs instead of tmpfs
+        log_msg "Retrying with ramfs instead of tmpfs..."
+        umount /cow 2>/dev/null
+        mount -t ramfs -o size=512M ramfs /cow
+        mkdir -p /cow/upper /cow/work
+        
+        mount -t overlay overlay \
+            -o lowerdir=/squash,upperdir=/cow/upper,workdir=/cow/work \
+            /.root || {
+            log_msg "ERROR: Overlay still failing!"
+            problem
+            return 1
+        }
+    fi
+    
     log_msg "Overlay mounted at /.root"
     
     # Verify overlay is writable
-    if ! touch /.root/test_write 2>/dev/null; then
+    log_msg "Testing overlay writability..."
+    if touch /.root/test_write 2>/dev/null; then
+        rm -f /.root/test_write
+        log_msg "Overlay is writable OK"
+    else
         log_msg "ERROR: Overlay is not writable!"
+        log_msg "Check overlay mount options:"
+        mount | grep overlay | while read line; do log_msg "  $line"; done
         problem
         return 1
     fi
-    rm -f /.root/test_write
     
     # Setup user files
     ensure_users
     
-    # Create bind mount directories
-    mkdir -p /.root/mnt/live /.root/mnt/changes /.root/mnt/container 2>/dev/null
-    
-    # Bind mount for persistence
-    mount --bind /cow/mod /.root/mnt/changes 2>/dev/null || log_msg "Warning: Could not bind mount changes"
-    mount --bind /mnt /.root/mnt/container 2>/dev/null || log_msg "Warning: Could not bind mount container"
-    mount --bind /squash /.root/mnt/live 2>/dev/null || log_msg "Warning: Could not bind mount live"
-    
-    # Verify root filesystem
-    verify_root_filesystem || return 1
+    # Verify init exists
+    if [ ! -x "/.root/sbin/init" ] && [ ! -x "/.root/bin/init" ]; then
+        log_msg "WARNING: No init found, creating fallback..."
+        # Create minimal init if needed (for testing)
+        if [ -f "/.root/bin/bash" ]; then
+            cat > /.root/sbin/init << 'EOF'
+#!/bin/bash
+echo "=== Minimal init ==="
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+exec /bin/bash
+EOF
+            chmod 755 /.root/sbin/init
+        fi
+    fi
     
     log_msg "Root filesystem prepared successfully!"
     return 0
 }
 
-# ===================== CLEANUP FUNCTIONS =====================
-
-cleanup_udev() {
-    log_msg "Stopping udev..."
-    killall -w udevd 2>/dev/null || true
-    killall -w systemd-udevd 2>/dev/null || true
-}
-
 # ===================== MAIN =====================
 
-# Parse cmdline early
+# Parse cmdline
 for param in $(cat /proc/cmdline 2>/dev/null || echo ""); do
     case $param in
         debug) DEBUG=true; set -x ;;
@@ -478,98 +316,41 @@ for param in $(cat /proc/cmdline 2>/dev/null || echo ""); do
 done
 
 log_msg "=== LeakOS Live ISO Init Starting ==="
-log_msg "Debug mode: $DEBUG"
 
 # Create essential directories
-log_msg "Creating essential directories..."
 mkdir -p /proc /sys /dev /run /tmp /dev/pts 2>/dev/null
 
 # Mount pseudo-filesystems
 log_msg "Mounting pseudo-filesystems..."
 
-# Mount devtmpfs
 mount -t devtmpfs devtmpfs /dev 2>/dev/null || {
-    log_msg "devtmpfs failed, trying tmpfs"
+    log_msg "devtmpfs failed"
     mount -t tmpfs tmpfs /dev
     mknod -m 622 /dev/console c 5 1 2>/dev/null
     mknod -m 666 /dev/null c 1 3 2>/dev/null
     mknod -m 666 /dev/zero c 1 5 2>/dev/null
-    mknod -m 644 /dev/random c 1 8 2>/dev/null
-    mknod -m 644 /dev/urandom c 1 9 2>/dev/null
 }
 
-# Mount proc (critical)
 mount -t proc proc /proc || {
     log_msg "CRITICAL: proc mount failed!"
     problem
 }
 
-# Mount sysfs
-mount -t sysfs sysfs /sys 2>/dev/null || log_msg "sysfs mount failed (non-fatal)"
+mount -t sysfs sysfs /sys 2>/dev/null || log_msg "sysfs mount failed"
+mount -t tmpfs tmpfs /run -o mode=755 2>/dev/null || true
+mount -t devpts devpts /dev/pts -o gid=5,mode=620 2>/dev/null || true
 
-# Mount tmpfs on /run
-mount -t tmpfs tmpfs /run -o mode=755 2>/dev/null || log_msg "tmpfs /run failed (non-fatal)"
-
-# Mount devpts
-mount -t devpts devpts /dev/pts -o gid=5,mode=620 2>/dev/null || log_msg "devpts mount failed (non-fatal)"
-
-# Verify /proc/cmdline exists
-if [ ! -r /proc/cmdline ]; then
-    log_msg "WARNING: /proc/cmdline missing - remounting /proc"
-    umount /proc 2>/dev/null
-    mount -t proc proc /proc || {
-        log_msg "Cannot remount /proc!"
-        problem
-    }
-fi
-
-# Read cmdline safely
-cmdline=$(cat /proc/cmdline 2>/dev/null || echo "")
-log_msg "Kernel cmdline: $cmdline"
-
-# Parse again for debug
-for param in $cmdline; do
-    case $param in
-        debug) DEBUG=true; set -x ;;
-    esac
-done
-
-# Start udev
+# Start udev if available
 log_msg "Starting udev..."
-UDEVD=""
-
-# Find udevd
-for p in /sbin/udevd /usr/sbin/udevd /lib/udev/udevd /usr/lib/udev/udevd /sbin/systemd-udevd; do
-    if [ -x "$p" ]; then
-        UDEVD="$p"
-        log_msg "Found udevd at $UDEVD"
-        break
-    fi
-done
-
-if [ -z "$UDEVD" ]; then
-    log_msg "udevd not found, continuing without udev"
-else
-    # Start udevd
-    $UDEVD --daemon --resolve-names=never 2>/dev/null || {
-        log_msg "Failed to start udevd"
-        UDEVD=""
-    }
+if [ -x /sbin/udevd ]; then
+    /sbin/udevd --daemon 2>/dev/null
+    udevadm trigger 2>/dev/null
+    udevadm settle --timeout=10 2>/dev/null
+    log_msg "udev started"
 fi
 
-# Trigger uevents if udev is running
-if [ -n "$UDEVD" ]; then
-    log_msg "Triggering uevents..."
-    udevadm trigger --action=add 2>/dev/null || true
-    udevadm settle --timeout=30 2>/dev/null || true
-    log_msg "udev ready"
-fi
-
-# Apply rootdelay if specified
-if [ -n "$rootdelay" ]; then
-    log_msg "Waiting $rootdelay seconds (rootdelay)..."
-    sleep "$rootdelay"
-fi
+# Apply rootdelay
+[ -n "$rootdelay" ] && sleep "$rootdelay"
 
 # Mount root filesystem
 log_msg "Setting up root filesystem..."
@@ -579,59 +360,31 @@ if ! do_mount_root; then
 fi
 
 # Cleanup udev
-[ -n "$UDEVD" ] && cleanup_udev
+killall udevd 2>/dev/null || true
 
-# Create /dev/console in new root if needed
-if [ ! -c "/.root/dev/console" ]; then
-    mknod -m 622 /.root/dev/console c 5 1 2>/dev/null
-fi
-
-if [ ! -c "/.root/dev/null" ]; then
-    mknod -m 666 /.root/dev/null c 1 3 2>/dev/null
-fi
-
-# Final debug
-if [ "$DEBUG" = true ]; then
-    log_msg "=== DEBUG: Pre-switchroot information ==="
-    log_msg "Current directory: $(pwd)"
-    log_msg "Init in new root:"
-    ls -la /.root/sbin/init /.root/bin/init /.root/init 2>/dev/null | while read line; do log_msg "  $line"; done
-    log_msg "Contents of /.root:"
-    ls -la /.root/ | head -20 | while read line; do log_msg "  $line"; done
-    log_msg "Mounts:"
-    mount | while read line; do log_msg "  $line"; done
-    
-    # Drop to shell for debugging if requested
-    if [ -f /tmp/debug_init ]; then
-        log_msg "Debug shell before switch_root. Type 'exit' to continue."
-        /bin/sh
-    fi
-fi
+# Create device nodes in new root
+[ ! -c "/.root/dev/console" ] && mknod -m 622 /.root/dev/console c 5 1 2>/dev/null
+[ ! -c "/.root/dev/null" ] && mknod -m 666 /.root/dev/null c 1 3 2>/dev/null
+[ ! -c "/.root/dev/zero" ] && mknod -m 666 /.root/dev/zero c 1 5 2>/dev/null
 
 # Final check
 if [ ! -x "/.root/sbin/init" ] && [ ! -x "/.root/bin/init" ]; then
-    log_msg "FATAL: No init found before switch_root!"
-    log_msg "Available executables in /.root:"
-    find /.root -type f -executable 2>/dev/null | head -20 | while read line; do log_msg "  $line"; done
+    log_msg "FATAL: No init found!"
+    log_msg "Contents of /.root:"
+    ls -la /.root/ 2>/dev/null | head -20
     problem
 fi
 
 # Switch to new root
 log_msg "Switching to new root..."
 
-# Try different switch_root syntaxes
 if [ -x "/.root/sbin/init" ]; then
-    exec switch_root /.root /sbin/init "$@"
+    exec switch_root /.root /sbin/init
 elif [ -x "/.root/bin/init" ]; then
-    exec switch_root /.root /bin/init "$@"
-elif [ -x "/.root/init" ]; then
-    exec switch_root /.root /init "$@"
+    exec switch_root /.root /bin/init
 else
-    log_msg "FATAL: Cannot find init to execute!"
-    problem
+    exec switch_root /.root /bin/sh
 fi
 
-# Fallback if exec fails
-log_msg "FATAL: switch_root failed!"
-log_msg "This should not happen if exec succeeded"
+# Fallback
 problem
