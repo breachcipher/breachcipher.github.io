@@ -54,20 +54,30 @@ find_boot_device() {
 
   mkdir -p "$mnt_tmp" 2>/dev/null
 
-  while [ $count -lt $timeout ]; do
-    for dev in $(lsblk -pnlo NAME); do
-      if [ -b "$dev" ]; then
-        log_msg "Probing device $dev..."
-
-        if mount -t auto -o ro "$dev" "$mnt_tmp" 2>/dev/null; then
-          if [ -f "$mnt_tmp/boot/lfs.squashfs" ]; then
-            device="$dev"
-            log_msg "Boot media DETECTED on $dev (found /boot/lfs.squashfs)"
-            return 0
-          else
-            umount "$mnt_tmp" 2>/dev/null
-          fi
+  # Coba mount satu device dengan berbagai fstype secara eksplisit
+  # Menghindari kernel salah tebak (exFAT, dll)
+  try_mount() {
+    local d="$1"
+    [ -b "$d" ] || return 1
+    for fstype in iso9660 vfat ext4 ext3 ext2 xfs btrfs auto; do
+      if mount -t "$fstype" -o ro "$d" "$mnt_tmp" 2>/dev/null; then
+        if [ -f "$mnt_tmp/boot/lfs.squashfs" ]; then
+          return 0
         fi
+        umount "$mnt_tmp" 2>/dev/null
+      fi
+    done
+    return 1
+  }
+
+  while [ $count -lt $timeout ]; do
+    for dev in $(lsblk -pnlo NAME 2>/dev/null); do
+      [ -b "$dev" ] || continue
+      log_msg "Probing device $dev..."
+      if try_mount "$dev"; then
+        device="$dev"
+        log_msg "Boot media DETECTED on $dev (found /boot/lfs.squashfs)"
+        return 0
       fi
     done
 
@@ -315,9 +325,6 @@ do_mount_root() {
   modprobe -q sr_mod   || true
   modprobe -q xhci_hcd || true
   modprobe -q ehci_hcd || true
-  modprobe -q e1000    || true
-  modprobe -q e1000e  || true
-  modprobe -q pcnet32 || true
   modprobe -q uhci_hcd || true
   modprobe -q vboxvideo   || true
   modprobe -q virtio_gpu  || true
