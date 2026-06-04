@@ -71,12 +71,24 @@ find_boot_device() {
   }
 
   while [ $count -lt $timeout ]; do
+    # Scan semua block device via lsblk
     for dev in $(lsblk -pnlo NAME 2>/dev/null); do
       [ -b "$dev" ] || continue
       log_msg "Probing device $dev..."
       if try_mount "$dev"; then
         device="$dev"
         log_msg "Boot media DETECTED on $dev (found /boot/lfs.squashfs)"
+        return 0
+      fi
+    done
+
+    # Optical drive: sr*, cdrom, dvd (kadang tidak muncul di lsblk)
+    for dev in /dev/sr0 /dev/sr1 /dev/cdrom /dev/cdrom1 /dev/dvd /dev/dvd1; do
+      [ -b "$dev" ] || continue
+      log_msg "Probing optical $dev..."
+      if try_mount "$dev"; then
+        device="$dev"
+        log_msg "Boot media DETECTED on optical $dev (found /boot/lfs.squashfs)"
         return 0
       fi
     done
@@ -118,7 +130,7 @@ EOF
     log_msg "Creating minimal /etc/shadow in overlay..."
     cat > /.root/etc/shadow << 'EOF'
 root:*:19490:0:99999:7:::
-live:$6$hrIle5KuazOX40Ge$aXM7O70/9.fvyVFD2IszFjz85qJsU/YGP2aRSkzQPVKtsOB47uXaA80NKGhSn92ZJ3RDNvC3IRnaTN8IbdodG.:19490:0:99999:7:::
+live:$6$2AJ3utKN719Q90VR$oTTnjl.5uXDdizR7sBS8kasr6u0kc5CD5XiWLKbv1jA8K6RsM6/362dWveOy7fSZaxpgIPywXx6.k6lHBkkNW1:19490:0:99999:7:::
 nobody:*:19490:0:99999:7:::
 EOF
     chmod 600 /.root/etc/shadow
