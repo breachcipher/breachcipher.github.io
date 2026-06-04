@@ -137,25 +137,85 @@ EOF
   fi
 
   mkdir -p /.root/etc/pam.d
+
+  # common-auth
   cat > /.root/etc/pam.d/common-auth << 'EOF'
 auth    sufficient      pam_unix.so nullok
 auth    required        pam_deny.so
 EOF
 
+  # common-account
+  cat > /.root/etc/pam.d/common-account << 'EOF'
+account sufficient      pam_unix.so
+EOF
+
+  # common-session
+  cat > /.root/etc/pam.d/common-session << 'EOF'
+session sufficient      pam_unix.so
+EOF
+
+  # common-password
+  cat > /.root/etc/pam.d/common-password << 'EOF'
+password sufficient      pam_unix.so nullok sha512 shadow
+EOF
+
+  # login — dipakai oleh getty
+  cat > /.root/etc/pam.d/login << 'EOF'
+auth       include      common-auth
+account    include      common-account
+session    include      common-session
+password   include      common-password
+EOF
+
+  # Pastikan shadow bisa dibaca oleh pam_unix
+  chmod 600 /.root/etc/shadow 2>/dev/null || true
+  chmod 644 /.root/etc/passwd 2>/dev/null || true
+  chmod 644 /.root/etc/group  2>/dev/null || true
+
+  # sudoers
+  mkdir -p /.root/etc/sudoers.d
+  cat > /.root/etc/sudoers << 'EOF'
+# /etc/sudoers
+Defaults env_reset
+Defaults mail_badpass
+Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+root    ALL=(ALL:ALL) ALL
+%sudo   ALL=(ALL:ALL) ALL
+live    ALL=(ALL:ALL) ALL
+
+EOF
+  chmod 440 /.root/etc/sudoers
+
+  # Tambah group sudo dan wheel jika belum ada
+  if ! grep -q "^sudo:" /.root/etc/group 2>/dev/null; then
+    echo "sudo:x:27:live" >> /.root/etc/group
+  fi
+  if ! grep -q "^wheel:" /.root/etc/group 2>/dev/null; then
+    echo "wheel:x:10:live" >> /.root/etc/group
+  fi
+
+  # PAM untuk sudo
+  cat > /.root/etc/pam.d/sudo << 'EOF'
+auth       sufficient   pam_unix.so nullok
+account    sufficient   pam_unix.so
+session    sufficient   pam_unix.so
+EOF
+
   if [ ! -d /.root/home/live ]; then
     log_msg "Creating home directory for live user with standard folders..."
     mkdir -p /.root/home/live
-    mkdir -p /.root/home/live/{Desktop,Documents,Downloads,Music,Pictures,Videos,Public,Templates}
+    mkdir -p /.root/home/live/{Desktop,Documents,Downloads,Music,Pictures,Videos}
     mkdir -p /.root/home/live/{.local/share,.config,.cache,.ssh,.gnupg}
     mkdir -p /.root/home/live/{temp,bin}
     chown -R 1000:1000 /.root/home/live
     chmod 700 /.root/home/live
-    chmod 755 /.root/home/live/{Desktop,Documents,Downloads,Music,Pictures,Videos,Public,Templates}
+    chmod 755 /.root/home/live/{Desktop,Documents,Downloads,Music,Pictures,Videos}
     chmod 700 /.root/home/live/{.ssh,.gnupg}
     log_msg "Created standard folders for live user"
   else
     log_msg "Home directory exists, ensuring standard folders..."
-    for folder in Desktop Documents Downloads Music Pictures Videos Public Templates; do
+    for folder in Desktop Documents Downloads Music Pictures Videos; do
       if [ ! -d "/.root/home/live/$folder" ]; then
         mkdir -p "/.root/home/live/$folder"
         chown 1000:1000 "/.root/home/live/$folder"
@@ -167,7 +227,7 @@ EOF
   if [ ! -d /.root/etc/skel ]; then
     log_msg "Creating /etc/skel with standard folders..."
     mkdir -p /.root/etc/skel
-    mkdir -p /.root/etc/skel/{Desktop,Documents,Downloads,Music,Pictures,Videos,Public,Templates}
+    mkdir -p /.root/etc/skel/{Desktop,Documents,Downloads,Music,Pictures,Videos}
     mkdir -p /.root/etc/skel/{.local/share,.config,.cache}
 
     cat > /.root/etc/skel/README.txt << 'EOF'
@@ -180,8 +240,6 @@ This is your home directory. Standard folders have been created:
 - Music      : For music files
 - Pictures   : For images
 - Videos     : For video files
-- Public     : For shared files
-- Templates  : For document templates
 
 Enjoy your LFS experience!
 EOF
@@ -241,8 +299,6 @@ XDG_DOWNLOAD_DIR="$HOME/Downloads"
 XDG_MUSIC_DIR="$HOME/Music"
 XDG_PICTURES_DIR="$HOME/Pictures"
 XDG_VIDEOS_DIR="$HOME/Videos"
-XDG_PUBLICSHARE_DIR="$HOME/Public"
-XDG_TEMPLATES_DIR="$HOME/Templates"
 EOF
     chown -R 1000:1000 /.root/home/live/.config
   fi
@@ -334,6 +390,10 @@ do_mount_root() {
   modprobe -q vfat     || true
   modprobe -q iso9660  || true
   modprobe -q usb-storage || true
+  modprobe e1000 || true
+  modprobe e1000e || true
+  modprobe pcnet32 || true
+  modprobe 8188eu || true
   modprobe -q sr_mod   || true
   modprobe -q xhci_hcd || true
   modprobe -q ehci_hcd || true
